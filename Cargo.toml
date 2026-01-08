@@ -28,6 +28,9 @@ vsock = "0.5"
 vmm-sys-util = "0.15.0"
 sha2 = "0.9.5"
 hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+base64 = "0.22"
+serde_bytes = "0.11"
 
 lazy_static = "1.4.0"
 
@@ -39,6 +42,15 @@ log = "0.4"
 num-derive = "0.4"
 num-traits = "0.2"
 tempfile = "3.19"
+warp = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+rcgen = "0.13"
+rustls = "0.23"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+hyper = { version = "1.4", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 [workspace]
 members = [".", "samples/command_executer", "driver-bindings", "eif_loader", "enclave_build", "vsock_proxy"]

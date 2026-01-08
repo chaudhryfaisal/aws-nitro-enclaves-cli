@@ -14,6 +14,8 @@ pub mod enclave_proc;
 pub mod enclave_proc_comm;
 /// The CLI-specific utilities module.
 pub mod utils;
+/// HTTP-based signing support module.
+pub mod http_signing;
 
 use aws_nitro_enclaves_image_format::defs::eif_hasher::EifHasher;
 use aws_nitro_enclaves_image_format::utils::eif_reader::EifReader;
@@ -296,30 +298,23 @@ pub fn describe_eif(eif_path: String) -> NitroCliResult<EifDescribeInfo> {
 
 /// Signs EIF with the given key and certificate. If EIF already has a signature, it will be replaced.
 pub fn sign_eif(args: SignEifArgs) -> NitroCliResult<()> {
-    let sign_info = match (&args.private_key, &args.signing_certificate) {
-        (Some(key), Some(cert)) => SignKeyData::new(key, Path::new(&cert)).map_or_else(
-            |e| {
-                eprintln!("Could not read signing info: {e:?}");
-                None
-            },
-            Some,
-        ),
-        _ => None,
-    };
-
-    let signer = EifSigner::new(sign_info).ok_or_else(|| {
-        new_nitro_cli_failure!(
-            format!("Failed to create EifSigner"),
-            NitroCliErrorEnum::EIFSigningError
-        )
-    })?;
-
-    signer.sign_image(&args.eif_path).map_err(|e| {
-        new_nitro_cli_failure!(
-            format!("Failed to sign image: {}", e),
-            NitroCliErrorEnum::EIFSigningError
-        )
-    })?;
+    match (&args.private_key, &args.signing_certificate) {
+        (Some(key), Some(cert)) => {
+            // Check if this is an HTTP signing URL
+            if http_signing::is_http_signing_url(key) {
+                sign_eif_with_http(key, cert, &args.eif_path)?;
+            } else {
+                // Use standard signing (local key or KMS)
+                sign_eif_with_standard(key, cert, &args.eif_path)?;
+            }
+        }
+        _ => {
+            return Err(new_nitro_cli_failure!(
+                "Both private-key and signing-certificate are required",
+                NitroCliErrorEnum::MissingArgument
+            ));
+        }
+    }
 
     eprintln!("Enclave Image successfully signed.");
 
@@ -348,6 +343,98 @@ pub fn sign_eif(args: SignEifArgs) -> NitroCliResult<()> {
             println!("{printed_info}");
             Ok(())
         })
+}
+
+/// Sign EIF using standard signing (local key or KMS).
+fn sign_eif_with_standard(key: &str, cert: &str, eif_path: &str) -> NitroCliResult<()> {
+    let sign_info = SignKeyData::new(key, Path::new(cert)).map_err(|e| {
+        new_nitro_cli_failure!(
+            &format!("Could not read signing info: {e:?}"),
+            NitroCliErrorEnum::EIFSigningError
+        )
+    })?;
+
+    let signer = EifSigner::new(Some(sign_info)).ok_or_else(|| {
+        new_nitro_cli_failure!(
+            "Failed to create EifSigner",
+            NitroCliErrorEnum::EIFSigningError
+        )
+    })?;
+
+    signer.sign_image(eif_path).map_err(|e| {
+        new_nitro_cli_failure!(
+            &format!("Failed to sign image: {}", e),
+            NitroCliErrorEnum::EIFSigningError
+        )
+    })?;
+
+    Ok(())
+}
+
+/// Sign EIF using HTTP signing endpoint.
+fn sign_eif_with_http(url: &str, cert_path: &str, eif_path: &str) -> NitroCliResult<()> {
+    use http_signing::HttpEifSigner;
+
+    // Create HTTP signer
+    let http_signer = HttpEifSigner::new(url, Path::new(cert_path)).map_err(|e| {
+        new_nitro_cli_failure!(
+            &format!("Failed to create HTTP signer: {}", e),
+            NitroCliErrorEnum::EIFSigningError
+        )
+    })?;
+
+    // Read EIF and get PCR0 value
+    let mut eif_reader = EifReader::from_eif(eif_path.to_string()).map_err(|e| {
+        new_nitro_cli_failure!(
+            &format!("Failed to read EIF: {e:?}"),
+            NitroCliErrorEnum::EifParsingError
+        )
+    })?;
+
+    let measurements = eif_reader.get_measurements().map_err(|e| {
+        new_nitro_cli_failure!(
+            &format!("Failed to get measurements: {e:?}"),
+            NitroCliErrorEnum::EifParsingError
+        )
+    })?;
+
+    let pcr0_hex = measurements.get("PCR0").ok_or_else(|| {
+        new_nitro_cli_failure!(
+            "PCR0 not found in measurements",
+            NitroCliErrorEnum::EifParsingError
+        )
+    })?;
+
+    let pcr0_bytes = hex::decode(pcr0_hex).map_err(|e| {
+        new_nitro_cli_failure!(
+            &format!("Failed to decode PCR0: {}", e),
+            NitroCliErrorEnum::EifParsingError
+        )
+    })?;
+
+    // Sign PCR0 via HTTP
+    let signature = http_signer.sign_pcr(0, &pcr0_bytes).map_err(|e| {
+        new_nitro_cli_failure!(
+            &format!("HTTP signing failed: {}", e),
+            NitroCliErrorEnum::EIFSigningError
+        )
+    })?;
+
+    // Write signature to EIF using the HTTP signing writer
+    http_signing::write_http_signature_to_eif(
+        eif_path,
+        http_signer.certificate(),
+        &signature,
+        eif_reader.signature_section.is_some(),
+    )
+    .map_err(|e| {
+        new_nitro_cli_failure!(
+            &format!("Failed to write signature to EIF: {}", e),
+            NitroCliErrorEnum::EIFSigningError
+        )
+    })?;
+
+    Ok(())
 }
 
 /// Returns the value of the `NITRO_CLI_BLOBS` environment variable.
@@ -771,7 +858,9 @@ macro_rules! create_app {
                     .arg(
                         Arg::new("private-key")
                             .long("private-key")
-                            .help("KMS key ARN or local path to developer's Eliptic Curve private key.")
+                            .help("Private key source: local file path, KMS ARN, or HTTPS signing URL. \
+                                   For HTTP signing use: https://host:port/path[;client_cert=PATH][;client_key=PATH]\
+                                   [;request_template=BASE64][;response_template=BASE64]")
                             .requires("signing-certificate"),
                     )
                     .arg(
@@ -878,7 +967,9 @@ macro_rules! create_app {
                     .arg(
                         Arg::new("private-key")
                             .long("private-key")
-                            .help("KMS key ARN or local path to developer's Eliptic Curve private key.")
+                            .help("Private key source: local file path, KMS ARN, or HTTPS signing URL. \
+                                   For HTTP signing use: https://host:port/path[;client_cert=PATH][;client_key=PATH]\
+                                   [;request_template=BASE64][;response_template=BASE64]")
                             .requires("signing-certificate"),
                     )
             )

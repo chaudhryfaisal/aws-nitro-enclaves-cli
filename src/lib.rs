@@ -426,6 +426,7 @@ fn sign_eif_with_http(url: &str, cert_path: &str, eif_path: &str) -> NitroCliRes
         http_signer.certificate(),
         &signature,
         eif_reader.signature_section.is_some(),
+        http_signer.algorithm(),
     )
     .map_err(|e| {
         new_nitro_cli_failure!(

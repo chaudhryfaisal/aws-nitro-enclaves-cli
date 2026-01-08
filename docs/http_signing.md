@@ -12,7 +12,7 @@ The `--private-key` parameter now supports three types of values:
 ## URL Format
 
 ```
-https://host:port/path;client_cert={path};client_key={path};request_template={base64};response_template={base64}
+https://host:port/path;algorithm={algo};client_cert={path};client_key={path};request_template={base64};response_template={base64}
 ```
 
 ### Parameters
@@ -20,6 +20,7 @@ https://host:port/path;client_cert={path};client_key={path};request_template={ba
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | Base URL | Yes | The HTTPS endpoint URL (e.g., `https://signing.example.com/v2/core/sign/ecdsa-sha256`) |
+| `algorithm` | No | Signing algorithm: `ES384` (default) or `ES512` |
 | `client_cert` | No | Path to client certificate file for mTLS authentication |
 | `client_key` | No | Path to client private key file for mTLS authentication |
 | `request_template` | No | Base64-encoded JSON template for the request body |
@@ -126,11 +127,32 @@ nitro-cli sign-eif \
 
 ## Algorithm Support
 
-The HTTP signing endpoint is expected to perform ECDSA signing with SHA-384 (ES384), which is the algorithm used for Nitro Enclave image signing. The endpoint should:
+The HTTP signing endpoint supports the following ECDSA algorithms:
+
+| Algorithm | Description | COSE ID | Default |
+|-----------|-------------|---------|---------|
+| `ES384` | ECDSA with P-384 curve and SHA-384 | -35 | Yes |
+| `ES512` | ECDSA with P-521 curve and SHA-512 | -37 | No |
+
+The algorithm can be specified in the URL using the `algorithm` parameter. If not specified, ES384 is used by default.
+
+### Example with ES512
+
+```bash
+nitro-cli build-enclave \
+  --docker-uri hello:latest \
+  --output-file hello.eif \
+  --signing-certificate cert.pem \
+  --private-key "https://signing.example.com/sign;algorithm=ES512"
+```
+
+### Endpoint Requirements
+
+The signing endpoint should:
 
 1. Accept the payload (PCR information serialized as CBOR)
-2. Compute SHA-384 hash of the payload
-3. Sign the hash using ECDSA with P-384 curve
+2. Compute the appropriate hash of the payload (SHA-384 for ES384, SHA-512 for ES512)
+3. Sign the hash using ECDSA with the corresponding curve (P-384 for ES384, P-521 for ES512)
 4. Return the signature in DER or raw format
 
 ## Error Handling

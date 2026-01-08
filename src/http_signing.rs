@@ -31,6 +31,53 @@ use std::time::Duration;
 /// Default request template: `{"message":"{payload}"}`
 const DEFAULT_REQUEST_TEMPLATE: &str = r#"{"message":"{payload}"}"#;
 
+/// Signing algorithm for ECDSA signatures.
+///
+/// Supported algorithms:
+/// - ES384: ECDSA with P-384 curve and SHA-384 (default)
+/// - ES512: ECDSA with P-521 curve and SHA-512
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SigningAlgorithm {
+    /// ECDSA with P-384 curve and SHA-384 (COSE algorithm ID: -35)
+    #[default]
+    ES384,
+    /// ECDSA with P-521 curve and SHA-512 (COSE algorithm ID: -37)
+    ES512,
+}
+
+impl SigningAlgorithm {
+    /// Get the COSE algorithm identifier for this signing algorithm.
+    pub fn cose_algorithm_id(&self) -> i32 {
+        match self {
+            SigningAlgorithm::ES384 => -35,
+            SigningAlgorithm::ES512 => -37,
+        }
+    }
+
+    /// Parse a signing algorithm from a string.
+    ///
+    /// Accepts "ES384" or "ES512" (case-insensitive).
+    pub fn from_str(s: &str) -> Result<Self, HttpSigningError> {
+        match s.to_uppercase().as_str() {
+            "ES384" => Ok(SigningAlgorithm::ES384),
+            "ES512" => Ok(SigningAlgorithm::ES512),
+            _ => Err(HttpSigningError::UrlParseError(format!(
+                "Invalid algorithm '{}'. Supported algorithms: ES384, ES512",
+                s
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for SigningAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SigningAlgorithm::ES384 => write!(f, "ES384"),
+            SigningAlgorithm::ES512 => write!(f, "ES512"),
+        }
+    }
+}
+
 /// Default response template: `{"signature":"{signature}"}`
 const DEFAULT_RESPONSE_TEMPLATE: &str = r#"{"signature":"{signature}"}"#;
 
@@ -88,6 +135,8 @@ pub struct HttpSigningConfig {
     pub request_template: String,
     /// Response template with {signature} placeholder
     pub response_template: String,
+    /// Signing algorithm (ES384 or ES512, defaults to ES384)
+    pub algorithm: SigningAlgorithm,
 }
 
 impl HttpSigningConfig {
@@ -183,12 +232,19 @@ impl HttpSigningConfig {
             )));
         }
 
+        // Parse algorithm (defaults to ES384)
+        let algorithm = match params.get("algorithm") {
+            Some(alg_str) => SigningAlgorithm::from_str(alg_str)?,
+            None => SigningAlgorithm::default(),
+        };
+
         Ok(HttpSigningConfig {
             url: base_url,
             client_cert_path,
             client_key_path,
             request_template,
             response_template,
+            algorithm,
         })
     }
 }
@@ -412,6 +468,11 @@ impl HttpSigner {
     pub fn url(&self) -> &str {
         &self.config.url
     }
+
+    /// Get the signing algorithm.
+    pub fn algorithm(&self) -> SigningAlgorithm {
+        self.config.algorithm
+    }
 }
 
 /// HTTP-based EIF signer that integrates with the EIF signing flow.
@@ -423,6 +484,8 @@ pub struct HttpEifSigner {
     http_signer: HttpSigner,
     /// The signing certificate content
     certificate: Vec<u8>,
+    /// The signing algorithm (ES384 or ES512)
+    algorithm: SigningAlgorithm,
 }
 
 impl HttpEifSigner {
@@ -430,14 +493,16 @@ impl HttpEifSigner {
     ///
     /// # Arguments
     ///
-    /// * `url` - The HTTP signing URL with optional parameters
+    /// * `url` - The HTTP signing URL with optional parameters (including algorithm)
     /// * `certificate_path` - Path to the signing certificate
     pub fn new(url: &str, certificate_path: &Path) -> Result<Self, HttpSigningError> {
         let http_signer = HttpSigner::new(url)?;
         let certificate = HttpSigner::get_certificate(certificate_path)?;
+        let algorithm = http_signer.algorithm();
         Ok(HttpEifSigner {
             http_signer,
             certificate,
+            algorithm,
         })
     }
 
@@ -476,6 +541,11 @@ impl HttpEifSigner {
     /// Get the HTTP signer URL.
     pub fn url(&self) -> &str {
         self.http_signer.url()
+    }
+
+    /// Get the signing algorithm.
+    pub fn algorithm(&self) -> SigningAlgorithm {
+        self.algorithm
     }
 }
 
@@ -539,17 +609,19 @@ struct EifSectionHeader {
 /// * `certificate` - The signing certificate in PEM format
 /// * `signature` - The raw signature bytes from the HTTP endpoint
 /// * `is_already_signed` - Whether the EIF already has a signature section
+/// * `algorithm` - The signing algorithm used (ES384 or ES512)
 pub fn write_http_signature_to_eif(
     eif_path: &str,
     certificate: &[u8],
     signature: &[u8],
     is_already_signed: bool,
+    algorithm: SigningAlgorithm,
 ) -> Result<(), HttpSigningError> {
     use std::fs::OpenOptions;
     use std::io::Read;
 
     // Build COSE signature structure
-    let cose_signature = build_cose_signature(signature)?;
+    let cose_signature = build_cose_signature(signature, algorithm)?;
 
     // Create PCR signature structure
     let pcr_signature = PcrSignature {
@@ -596,20 +668,25 @@ pub fn write_http_signature_to_eif(
 ///
 /// The HTTP endpoint returns raw ECDSA signature bytes. We need to wrap them
 /// in a COSE_Sign1 structure for the EIF format.
-fn build_cose_signature(raw_signature: &[u8]) -> Result<Vec<u8>, HttpSigningError> {
+///
+/// # Arguments
+///
+/// * `raw_signature` - The raw ECDSA signature bytes
+/// * `algorithm` - The signing algorithm (ES384 or ES512)
+fn build_cose_signature(raw_signature: &[u8], algorithm: SigningAlgorithm) -> Result<Vec<u8>, HttpSigningError> {
     // COSE_Sign1 structure:
     // [protected_header, unprotected_header, payload, signature]
     //
     // For EIF signing:
-    // - protected_header: CBOR map with algorithm identifier (ES384 = -35)
+    // - protected_header: CBOR map with algorithm identifier (ES384 = -35, ES512 = -37)
     // - unprotected_header: empty map
     // - payload: null (external payload)
     // - signature: the raw signature bytes
 
-    // Build protected header: {"alg": -35} (ES384)
+    // Build protected header: {"alg": <algorithm_id>}
     let mut protected_header = Vec::new();
     let mut alg_map: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
-    alg_map.insert(1, -35);
+    alg_map.insert(1, algorithm.cose_algorithm_id());
     ciborium::into_writer(&alg_map, &mut protected_header).map_err(|e| {
         HttpSigningError::RequestError(format!("Failed to build protected header: {}", e))
     })?;
@@ -951,6 +1028,59 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_url_default_algorithm() {
+        let config = HttpSigningConfig::parse("https://example.com/sign").unwrap();
+        assert_eq!(config.algorithm, SigningAlgorithm::ES384);
+    }
+
+    #[test]
+    fn test_parse_url_with_algorithm_es384() {
+        let config = HttpSigningConfig::parse("https://example.com/sign;algorithm=ES384").unwrap();
+        assert_eq!(config.algorithm, SigningAlgorithm::ES384);
+    }
+
+    #[test]
+    fn test_parse_url_with_algorithm_es512() {
+        let config = HttpSigningConfig::parse("https://example.com/sign;algorithm=ES512").unwrap();
+        assert_eq!(config.algorithm, SigningAlgorithm::ES512);
+    }
+
+    #[test]
+    fn test_parse_url_with_algorithm_case_insensitive() {
+        let config = HttpSigningConfig::parse("https://example.com/sign;algorithm=es512").unwrap();
+        assert_eq!(config.algorithm, SigningAlgorithm::ES512);
+        
+        let config2 = HttpSigningConfig::parse("https://example.com/sign;algorithm=Es384").unwrap();
+        assert_eq!(config2.algorithm, SigningAlgorithm::ES384);
+    }
+
+    #[test]
+    fn test_parse_url_with_invalid_algorithm() {
+        let result = HttpSigningConfig::parse("https://example.com/sign;algorithm=ES256");
+        assert!(result.is_err());
+        match result {
+            Err(HttpSigningError::UrlParseError(msg)) => {
+                assert!(msg.contains("ES256"));
+                assert!(msg.contains("ES384"));
+                assert!(msg.contains("ES512"));
+            }
+            _ => panic!("Expected UrlParseError"),
+        }
+    }
+
+    #[test]
+    fn test_signing_algorithm_cose_ids() {
+        assert_eq!(SigningAlgorithm::ES384.cose_algorithm_id(), -35);
+        assert_eq!(SigningAlgorithm::ES512.cose_algorithm_id(), -37);
+    }
+
+    #[test]
+    fn test_signing_algorithm_display() {
+        assert_eq!(format!("{}", SigningAlgorithm::ES384), "ES384");
+        assert_eq!(format!("{}", SigningAlgorithm::ES512), "ES512");
+    }
+
+    #[test]
     fn test_find_signature_path_simple() {
         let config = HttpSigningConfig {
             url: "https://example.com".to_string(),
@@ -958,6 +1088,7 @@ mod tests {
             client_key_path: None,
             request_template: DEFAULT_REQUEST_TEMPLATE.to_string(),
             response_template: r#"{"signature":"{signature}"}"#.to_string(),
+            algorithm: SigningAlgorithm::default(),
         };
         let signer = HttpSigner {
             config,
@@ -975,6 +1106,7 @@ mod tests {
             client_key_path: None,
             request_template: DEFAULT_REQUEST_TEMPLATE.to_string(),
             response_template: r#"{"result":{"data":{"sig":"{signature}"}}}"#.to_string(),
+            algorithm: SigningAlgorithm::default(),
         };
         let signer = HttpSigner {
             config,
@@ -992,6 +1124,7 @@ mod tests {
             client_key_path: None,
             request_template: DEFAULT_REQUEST_TEMPLATE.to_string(),
             response_template: r#"{"signature":"{signature}"}"#.to_string(),
+            algorithm: SigningAlgorithm::default(),
         };
         let signer = HttpSigner {
             config,
@@ -1010,6 +1143,7 @@ mod tests {
             client_key_path: None,
             request_template: DEFAULT_REQUEST_TEMPLATE.to_string(),
             response_template: r#"{"result":{"sig":"{signature}"}}"#.to_string(),
+            algorithm: SigningAlgorithm::default(),
         };
         let signer = HttpSigner {
             config,
@@ -1021,10 +1155,21 @@ mod tests {
     }
 
     #[test]
-    fn test_build_cose_signature() {
-        // Test that we can build a valid COSE signature structure
+    fn test_build_cose_signature_es384() {
+        // Test that we can build a valid COSE signature structure with ES384
         let raw_signature = vec![0x01, 0x02, 0x03, 0x04];
-        let result = build_cose_signature(&raw_signature);
+        let result = build_cose_signature(&raw_signature, SigningAlgorithm::ES384);
+        assert!(result.is_ok());
+        let cose_bytes = result.unwrap();
+        // Should start with CBOR tag 18 (0xd2)
+        assert_eq!(cose_bytes[0], 0xd2);
+    }
+
+    #[test]
+    fn test_build_cose_signature_es512() {
+        // Test that we can build a valid COSE signature structure with ES512
+        let raw_signature = vec![0x01, 0x02, 0x03, 0x04];
+        let result = build_cose_signature(&raw_signature, SigningAlgorithm::ES512);
         assert!(result.is_ok());
         let cose_bytes = result.unwrap();
         // Should start with CBOR tag 18 (0xd2)

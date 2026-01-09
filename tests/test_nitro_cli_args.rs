@@ -737,4 +737,84 @@ mod test_nitro_cli_args {
 
         assert!(app.try_get_matches_from(args).is_ok())
     }
+
+    #[test]
+    fn build_signed_enclave_correct_command_http_signing() {
+        let app = create_app!();
+        let args = vec![
+            "nitro cli",
+            "build-enclave",
+            "--docker-uri",
+            "dkr.ecr.us-east-1.amazonaws.com/stronghold-develss",
+            "--docker-dir",
+            "dir/",
+            "--output-file",
+            "image.eif",
+            "--signing-certificate",
+            "cert.pem",
+            "--private-key",
+            "https://signing.example.com/v2/core/sign/ecdsa",
+        ];
+
+        assert!(app.try_get_matches_from(args).is_ok())
+    }
+
+    #[test]
+    fn build_signed_enclave_correct_command_http_signing_with_mtls() {
+        let app = create_app!();
+        let args = vec![
+            "nitro cli",
+            "build-enclave",
+            "--docker-uri",
+            "dkr.ecr.us-east-1.amazonaws.com/stronghold-develss",
+            "--docker-dir",
+            "dir/",
+            "--output-file",
+            "image.eif",
+            "--signing-certificate",
+            "cert.pem",
+            "--private-key",
+            "https://signing.example.com/sign;client_cert=/path/to/client.crt;client_key=/path/to/client.key",
+        ];
+
+        assert!(app.try_get_matches_from(args).is_ok())
+    }
+
+    #[test]
+    fn build_signed_enclave_correct_command_http_signing_with_algorithm() {
+        let app = create_app!();
+        let args = vec![
+            "nitro cli",
+            "build-enclave",
+            "--docker-uri",
+            "dkr.ecr.us-east-1.amazonaws.com/stronghold-develss",
+            "--docker-dir",
+            "dir/",
+            "--output-file",
+            "image.eif",
+            "--signing-certificate",
+            "cert.pem",
+            "--private-key",
+            "https://signing.example.com/sign;algorithm=ES512",
+        ];
+
+        assert!(app.try_get_matches_from(args).is_ok())
+    }
+
+    #[test]
+    fn sign_enclave_correct_command_http_signing() {
+        let app = create_app!();
+        let args = vec![
+            "nitro cli",
+            "sign-eif",
+            "--eif-path",
+            "image.eif",
+            "--signing-certificate",
+            "cert.pem",
+            "--private-key",
+            "https://signing.example.com/v2/core/sign/ecdsa",
+        ];
+
+        assert!(app.try_get_matches_from(args).is_ok())
+    }
 }

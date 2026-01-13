@@ -30,6 +30,7 @@ sha2 = "0.9.5"
 hex = "0.4"
 
 lazy_static = "1.4.0"
+anyhow = "1.0.100"
 
 [build-dependencies]
 bindgen = { version=">=0.54" }
@@ -39,9 +40,17 @@ log = "0.4"
 num-derive = "0.4"
 num-traits = "0.2"
 tempfile = "3.19"
+actix-web = { version = "4.12.1", features = ["openssl"] }
+base64 = "0.21"
+aws-nitro-enclaves-cose = { git = "https://github.com/chaudhryfaisal/aws-nitro-enclaves-cose.git", branch="key_http" }
 
 [workspace]
 members = [".", "samples/command_executer", "driver-bindings", "eif_loader", "enclave_build", "vsock_proxy"]
 
 [features]
 default = []
+
+[patch."https://github.com/chaudhryfaisal/aws-nitro-enclaves-cose.git"]
+aws-nitro-enclaves-cose = { path = "../aws-nitro-enclaves-cose" }
+[patch."https://github.com/chaudhryfaisal/aws-nitro-enclaves-image-format.git"]
+aws-nitro-enclaves-image-format = { path = "../aws-nitro-enclaves-image-format" }

@@ -477,7 +477,6 @@ mod tests {
                     "/v2/core/sign/ecdsa-sha384",
                     actix_web::web::post().to(move |query: web::Query<SignQuery>,
                                                     body: web::Json<SignBody>| {
-                        let key_len = 48; // P-384 => 48 bytes
                         let key_bytes = bytes.clone();
                         async move {
                             let pre_digest = query.pre_digest;
@@ -539,8 +538,7 @@ mod tests {
                                     return HttpResponse::InternalServerError().body("sign");
                                 }
                             };
-                            let raw_sig = convert_to_raw_sig(ecdsa_sig, key_len);
-                            let sig_b64 = general_purpose::STANDARD.encode(raw_sig);
+                            let sig_b64 = general_purpose::STANDARD.encode(ecdsa_sig.to_der().unwrap());
                             let resp = json!({ "signature": sig_b64 });
                             HttpResponse::Ok().json(resp)
                         }
@@ -566,16 +564,5 @@ mod tests {
         // Give server a brief moment to start
         std::thread::sleep(Duration::from_millis(300));
         Ok((rx, srv_thread))
-    }
-
-    fn convert_to_raw_sig(ecdsa_sig: EcdsaSig, key_len: usize) -> Vec<u8> {
-        let r = ecdsa_sig.r().to_vec();
-        let s = ecdsa_sig.s().to_vec();
-        let mut raw_sig = vec![0u8; key_len * 2];
-        let r_off = key_len.saturating_sub(r.len());
-        raw_sig[r_off..r_off + r.len()].copy_from_slice(&r);
-        let s_off = key_len + key_len.saturating_sub(s.len());
-        raw_sig[s_off..s_off + s.len()].copy_from_slice(&s);
-        raw_sig
     }
 }
